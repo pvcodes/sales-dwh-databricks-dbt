@@ -1,5 +1,7 @@
 # ERP CRM DATA WAREHOUSE
 
+> [Project Status and Working](https://notes.pvcodes.in/data-warehousing-project)
+
 ### Objective
 Develop a modern data warehouse using SQL Server to consolidate sales data, enabling analytical reporting and informed decision-making.
 
