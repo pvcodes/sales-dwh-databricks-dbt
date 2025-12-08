@@ -1,0 +1,29 @@
+**/database.ini
+
+# uv-specific files
+.venv/
+.python-version
+
+# Virtual environments
+venv/
+env/
+*.egg-info/
+.env
+
+# Byte-compiled / optimized files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+# IDE-specific files
+.idea/
+.vscode/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Other common files
+dist/
+build/
