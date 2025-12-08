@@ -1,31 +1,31 @@
-import sys
-from pathlib import Path
+# import sys
+# from pathlib import Path
 import time
 
-try:
-    project_root = Path(__file__).resolve().parent.parent
-    sys.path.append(str(project_root))
-except Exception:
-    # __file__ may not exist in some environments; ignore safely
-    pass
+# try:
+#     project_root = Path(__file__).resolve().parent.parent
+#     sys.path.append(str(project_root))
+# except Exception as e:
+#     print("Failed to add project root to sys.path", e)
+#     # __file__ may not exist in some environments; ignore safely
+#     pass
 
-import psycopg2
+# import psycopg2
 from psycopg2 import sql
-from config import load_config
+# from config import load_config
 
-
-def connect(config):
-    """Connect to PostgreSQL and return a live connection."""
-    try:
-        # Do NOT use a context manager on the connection; it will close on exit.
-        conn = psycopg2.connect(**config)
-        # Optional: set autocommit False and manage transactions explicitly.
-        conn.autocommit = False
-        print("Connected to the PostgreSQL server.")
-        return conn
-    except (psycopg2.DatabaseError, Exception) as error:
-        print(f"Database connection error: {error}")
-        raise
+# def connect(config):
+#     """Connect to PostgreSQL and return a live connection."""
+#     try:
+#         # Do NOT use a context manager on the connection; it will close on exit.
+#         conn = psycopg2.connect(**config)
+#         # Optional: set autocommit False and manage transactions explicitly.
+#         conn.autocommit = False
+#         print("Connected to the PostgreSQL server.")
+#         return conn
+#     except (psycopg2.DatabaseError, Exception) as error:
+#         print(f"Database connection error: {error}")
+#         raise
 
 
 def run_bronze_layer(conn, tablename, schema, filename):
@@ -67,7 +67,7 @@ def run_bronze_layer(conn, tablename, schema, filename):
         conn.commit()
         elapsed = time.time() - start
         print(
-            f"Data copied successfully. {rowcount} rows loaded in {elapsed:.2f}s."
+            f"Data copied successfully for {schema}.{tablename} -  {rowcount} rows loaded in {elapsed:.2f}s."
         )
 
         return rowcount
@@ -79,27 +79,27 @@ def run_bronze_layer(conn, tablename, schema, filename):
         raise
 
 
-if __name__ == "__main__":
-    # Optionally add project root to sys.path
-    config = load_config()
-    conn = connect(config)
+# if __name__ == "__main__":
+#     # Optionally add project root to sys.path
+#     config = load_config()
+#     conn = connect(config)
 
-    try:
-        # Example executions (uncomment as needed)
-        # run_bronze_layer(conn,
-        #                  tablename="crm_cust_info",
-        #                  schema="bronze",
-        #                  filename="datasets/source_crm/cust_info.csv")
+#     try:
+#         # Example executions (uncomment as needed)
+#         # run_bronze_layer(conn,
+#         #                  tablename="crm_cust_info",
+#         #                  schema="bronze",
+#         #                  filename="datasets/source_crm/cust_info.csv")
 
-        # run_bronze_layer(conn,
-        #                  tablename="crm_prd_info",
-        #                  schema="bronze",
-        #                  filename="datasets/source_crm/prd_info.csv")
+#         # run_bronze_layer(conn,
+#         #                  tablename="crm_prd_info",
+#         #                  schema="bronze",
+#         #                  filename="datasets/source_crm/prd_info.csv")
 
-        run_bronze_layer(conn,
-                         tablename="crm_sales_details",
-                         schema="bronze",
-                         filename="datasets/source_crm/sales_details.csv")
-    finally:
-        conn.close()
-        print("Connection closed.")
+#         # run_bronze_layer(conn,
+#         #                  tablename="crm_sales_details",
+#         #                  schema="bronze",
+#         #                  filename="datasets/source_crm/sales_details.csv")
+#     finally:
+#         conn.close()
+#         print("Connection closed.")
