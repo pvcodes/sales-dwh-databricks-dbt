@@ -27,3 +27,6 @@ Thumbs.db
 # Other common files
 dist/
 build/
+*.log
+.cache/
+.pythonlibs/

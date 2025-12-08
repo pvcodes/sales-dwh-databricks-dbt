@@ -1,1 +1,1 @@
-from .main import connect
+from .main import load_config, connect
