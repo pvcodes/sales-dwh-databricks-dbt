@@ -1,31 +1,5 @@
-# import sys
-# from pathlib import Path
 import time
-
-# try:
-#     project_root = Path(__file__).resolve().parent.parent
-#     sys.path.append(str(project_root))
-# except Exception as e:
-#     print("Failed to add project root to sys.path", e)
-#     # __file__ may not exist in some environments; ignore safely
-#     pass
-
-# import psycopg2
 from psycopg2 import sql
-# from config import load_config
-
-# def connect(config):
-#     """Connect to PostgreSQL and return a live connection."""
-#     try:
-#         # Do NOT use a context manager on the connection; it will close on exit.
-#         conn = psycopg2.connect(**config)
-#         # Optional: set autocommit False and manage transactions explicitly.
-#         conn.autocommit = False
-#         print("Connected to the PostgreSQL server.")
-#         return conn
-#     except (psycopg2.DatabaseError, Exception) as error:
-#         print(f"Database connection error: {error}")
-#         raise
 
 
 def run_bronze_layer(conn, tablename, schema, filename):
