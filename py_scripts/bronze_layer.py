@@ -5,7 +5,8 @@ import time
 try:
     project_root = Path(__file__).resolve().parent.parent
     sys.path.append(str(project_root))
-except Exception:
+except Exception as e:
+    print("Failed to add project root to sys.path", e)
     # __file__ may not exist in some environments; ignore safely
     pass
 
