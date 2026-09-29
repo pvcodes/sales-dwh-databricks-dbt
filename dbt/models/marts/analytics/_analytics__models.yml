@@ -1,0 +1,119 @@
+version: 2
+
+models:
+  - name: agg_kpi__monthly_performance
+    description: >
+      Monthly KPI tile: revenue, margin, orders, customers and fulfilment speed
+      with month-over-month and year-over-year comparison. This is the table the
+      executive dashboard is built on, so it carries its own derived measures
+      (average order value, revenue per customer) rather than leaving the
+      consumer to divide aggregates in the BI tool.
+    columns:
+      - name: order_year_month
+        description: "Reporting month, `YYYY-MM`."
+        data_tests:
+          - not_null
+          - unique
+      - name: gross_revenue
+        data_tests:
+          - not_null
+      - name: gross_margin
+        data_tests:
+          - not_null
+      - name: order_count
+        data_tests:
+          - not_null
+      - name: average_order_value
+        description: "Revenue divided by distinct orders."
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(gross_revenue > 0 and units_sold > 0 and order_count > 0)"
+
+  - name: agg_products__performance
+    description: >
+      Per-product performance with an ABC band derived from cumulative revenue
+      share. Used for range reviews, pricing and delisting decisions.
+    columns:
+      - name: product_key
+        data_tests:
+          - not_null
+          - unique
+      - name: revenue_rank
+        description: "Dense rank by lifetime revenue, 1 being the top seller."
+        data_tests:
+          - not_null
+      - name: cumulative_revenue_share
+        data_tests:
+          - not_null
+      - name: abc_class
+        description: "A covers the top ~80% of revenue, B the next ~15%, C the tail."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["A", "B", "C"]
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(cumulative_revenue_share > 0 and cumulative_revenue_share <= 1.0001)"
+
+  - name: agg_products__category_rollup
+    description: >
+      Category and subcategory rollup of revenue, margin and share of portfolio.
+      Products whose category cannot be resolved are grouped under
+      `UNCLASSIFIED` so they are visible rather than dropped.
+    columns:
+      - name: category_id
+        data_tests:
+          - not_null
+      - name: gross_revenue
+        data_tests:
+          - not_null
+      - name: revenue_share
+        data_tests:
+          - not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ["category_id", "subcategory_name", "product_line"]
+
+  - name: agg_customers__rfm_segmentation
+    description: >
+      RFM segmentation of purchasing customers. Customers with no orders are
+      excluded, since a recency and frequency score would be meaningless for
+      them; they remain available in `dim_customers`.
+    columns:
+      - name: customer_sk
+        data_tests:
+          - not_null
+          - unique
+      - name: recency_score
+        description: "1-5, where 5 is the most recently active."
+        data_tests:
+          - not_null
+      - name: frequency_score
+        description: "1-5, where 5 is the most frequent."
+        data_tests:
+          - not_null
+      - name: monetary_score
+        description: "1-5, where 5 is the highest value."
+        data_tests:
+          - not_null
+      - name: customer_segment
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - "Champions"
+                  - "Loyal Customers"
+                  - "Recent Customers"
+                  - "At Risk"
+                  - "Hibernating"
+                  - "Big Spenders"
+                  - "Need Attention"
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(recency_score between 1 and 5 and frequency_score between 1 and 5 and monetary_score between 1 and 5)"
