@@ -1,0 +1,70 @@
+name: "sales_dwh"
+version: "1.0.0"
+config-version: 2
+
+profile: "sales_dwh"
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  bronze_schema: "bronze"
+  silver_schema: "silver"
+  gold_schema: "gold"
+  # Reporting horizon used by the date spine. `dbt_utils.date_spine` treats
+  # end_date as exclusive, so one day beyond the desired horizon is given.
+  reporting_start_date: "2010-01-01"
+  reporting_end_date: "2016-01-01"
+  # Days of Delta VACUUM history retained on bronze tables by the maintenance job.
+  bronze_vacuum_retention_days: 30
+  # How many days of incremental fact rebuilds we allow by default.
+  fact_lookback_days: 3
+  # Ceiling on the share of raw sales lines silver is allowed to reject. A
+  # breach means the upstream feed changed shape, not that data got dirtier.
+  max_sales_rejection_rate: 0.01
+
+models:
+  sales_dwh:
+    +persist_docs:
+      relation: true
+      columns: true
+    # NOTE: the medallion schema names are written literally rather than as
+    # `{{ var(...) }}`. dbt renders this block before `vars:` is loaded, so a
+    # var reference here fails to resolve. The `generate_schema_name` macro
+    # returns custom schemas verbatim, so these land exactly as written.
+    staging:
+      +materialized: view
+      +tags: ["staging"]
+      +schema: "silver"
+    # Intermediate models stay as views rather than ephemeral CTEs: dbt inlines
+    # ephemeral models into every parent, and the shared CTE names they use
+    # (`customers`, `joined`, ...) then collide. Views also keep the conformed
+    # layer queryable for debugging in the warehouse.
+    intermediate:
+      +materialized: view
+      +tags: ["intermediate"]
+      +schema: "silver"
+    marts:
+      +schema: "gold"
+      core:
+        facts:
+          +materialized: incremental
+          +incremental_strategy: "merge"
+          +unique_key: "sales_line_id"
+          +on_schema_change: "sync_all_columns"
+        dimensions:
+          +materialized: table
+      analytics:
+        +materialized: table
+        +tags: ["analytics"]
+
+tests:
+  sales_dwh:
+    +store_failures: true
+    +schema: "dbt_test_failures"
