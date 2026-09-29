@@ -1,9 +1,18 @@
 [project]
 name = "erp-crm-data-warehouse"
 version = "0.1.0"
-description = "Add your description here"
+description = "Medallion data warehouse on Databricks: Auto Loader bronze ingestion, dbt silver/gold transformation, and dimensional analytics"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "psycopg2-binary>=2.9.11",
+]
+
+[dependency-groups]
+# The DuckDB adapter is what makes the whole project runnable without a
+# Databricks workspace; the Databricks adapter is what runs it in production.
+dev = [
+    "dbt-core>=1.8,<2",
+    "dbt-duckdb>=1.8,<2",
+    "dbt-databricks>=1.8,<2",
 ]
