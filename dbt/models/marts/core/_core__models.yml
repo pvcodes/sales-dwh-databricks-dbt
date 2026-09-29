@@ -1,0 +1,185 @@
+version: 2
+
+models:
+  # ------------------------------------------------------------ dimensions ---
+  - name: dim_customers
+    description: >
+      Customer dimension (SCD type 1). One row per customer, including customers
+      that have never ordered, so that customer-base counts are not understated.
+      The `is_customer` flag separates the registered base from actual buyers.
+    columns:
+      - name: customer_sk
+        description: "Warehouse surrogate key, a hash of the natural key."
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: "CRM surrogate key, the natural key of this dimension."
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_key
+        data_tests:
+          - not_null
+          - unique
+      - name: gender
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Male", "Female", "Unknown"]
+      - name: marital_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Married", "Single", "Unknown"]
+      - name: country
+        description: "Canonical country name, or `Unknown`."
+        data_tests:
+          - not_null
+      - name: age_band
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  ["Unknown", "Under 18", "18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
+      - name: current_age
+        description: "Age in completed years, null when no birth date is on file."
+      - name: lifetime_sales_amount
+        description: "Total revenue ever ordered; zero for customers who never ordered."
+      - name: is_customer
+        description: "True when the customer has placed at least one order."
+
+  - name: dim_products
+    description: >
+      Product dimension (SCD type 2). One row per product version, with an
+      inclusive `valid_from_date`/`valid_to_date` window and an `is_current`
+      flag. The window is rebuilt from version start dates rather than the
+      source end dates, which are unreliable.
+    columns:
+      - name: product_sk
+        description: "Surrogate key, a hash of the natural key and version start."
+        data_tests:
+          - not_null
+          - unique
+      - name: product_key
+        description: "Natural product key."
+        data_tests:
+          - not_null
+      - name: product_version_id
+        description: "Surrogate key of the source product version."
+      - name: valid_from_date
+        description: "First day this version is effective."
+        data_tests:
+          - not_null
+      - name: valid_to_date
+        description: >
+          Last day this version is effective. `9999-12-31` marks the open ended
+          current version.
+        data_tests:
+          - not_null
+      - name: is_current
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+      - name: version_number
+        description: "Sequence of this version within the product, from 1."
+        data_tests:
+          - not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ["product_key", "valid_from_date"]
+
+  - name: dim_dates
+    description: >
+      Calendar dimension spanning the reporting horizon, generated
+      independently of the fact so that periods with no orders still appear in
+      reports. Grain: one row per day.
+    columns:
+      - name: date_key
+        description: "The calendar day."
+        data_tests:
+          - not_null
+          - unique
+      - name: date_year
+        data_tests:
+          - not_null
+      - name: date_quarter
+        data_tests:
+          - not_null
+      - name: date_year_month
+        data_tests:
+          - not_null
+      - name: is_weekend
+        data_tests:
+          - not_null
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(date_quarter between 1 and 4 and date_month_number between 1 and 12)"
+
+  # ----------------------------------------------------------------- facts ---
+  - name: fct_sales
+    description: >
+      Sales fact at order-line grain, the centre of the star schema. Degenerate
+      `order_number` dimension plus foreign keys to `dim_customers` and
+      `dim_products`, and the calendar is denormalised onto the row so the usual
+      BI questions need no join.
+      Rebuilt incrementally over a lookback window rather than appended, so that
+      restated orders do not leave stale rows behind.
+    columns:
+      - name: sales_line_id
+        description: "Natural order line key, `<order_number>-<product_key>`."
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_sk
+        description: "Foreign key to `dim_customers.customer_sk`."
+        data_tests:
+          - not_null
+      - name: product_sk
+        description: "Foreign key to `dim_products.product_sk`."
+        data_tests:
+          - not_null
+      - name: order_date
+        description: "Date the order was placed."
+        data_tests:
+          - not_null
+      - name: order_year
+        data_tests:
+          - not_null
+      - name: order_year_month
+        data_tests:
+          - not_null
+      - name: sales_amount
+        description: "Extended line amount. Additive."
+        data_tests:
+          - not_null
+      - name: quantity
+        description: "Units sold. Additive."
+        data_tests:
+          - not_null
+      - name: gross_margin
+        description: >
+          Revenue less cost of goods for the line. Additive, and null only for
+          the two products with no cost on file.
+        data_tests:
+          - not_null
+      - name: unit_price
+        description: "List price per unit. Semi-additive: never sum across orders."
+      - name: days_to_ship
+        description: "Order date to ship date. Semi-additive: average, do not sum."
+        data_tests:
+          - not_null
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(sales_amount > 0 and quantity > 0 and unit_price > 0)"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(ship_date >= order_date and due_date >= ship_date)"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(order_month_number between 1 and 12 and order_quarter between 1 and 4)"
