@@ -1,0 +1,49 @@
+version: 2
+
+# Local validation profile.
+#
+# Runs the exact same dbt code against DuckDB so the full model graph, tests and
+# docs can be exercised without a warehouse. Nothing adapter-specific is allowed
+# to leak into the models: every dialect difference goes through a macro in
+# dbt/macros/, which is what makes this target possible.
+sales_dwh:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # dbt-duckdb resolves this against the *current working directory*, not
+      # against this file, so the default assumes dbt is invoked from dbt/.
+      # SALES_DWH_DUCKDB_PATH lets CI and other callers pass an absolute path.
+      path: "{{ env_var('SALES_DWH_DUCKDB_PATH', '../.local/sales_dwh.duckdb') }}"
+      schema: main
+      threads: 4
+      extensions:
+        - delta
+      settings:
+        memory_limit: 2GB
+
+    ci:
+      type: duckdb
+      path: "{{ env_var('SALES_DWH_DUCKDB_CI_PATH', '../.local/sales_dwh_ci.duckdb') }}"
+      schema: main
+      threads: 4
+      extensions:
+        - delta
+
+    # The production shape. Point DATABRICKS_* env vars at a workspace and this
+    # becomes the target the Asset Bundle deploys against. Catalog resolution and
+    # the medallion schemas are driven by the vars in dbt_project.yml.
+    databricks:
+      type: databricks
+      catalog: "{{ env_var('DATABRICKS_CATALOG', 'sales_dwh_dev') }}"
+      schema: "{{ env_var('DATABRICKS_BRONZE_SCHEMA', 'bronze') }}"
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 8
+      # The dbt tasks in databricks.yml hand off credentials to the warehouse
+      # via OIDC rather than a personal token, so this is the auth_method the
+      # bundle's dbt task uses by default.
+      connect_retries: 5
+      connect_timeout: 60
+      retry_on_limit: 5
