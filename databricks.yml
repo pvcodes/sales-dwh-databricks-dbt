@@ -1,0 +1,226 @@
+# Databricks Asset Bundle for the sales DWH.
+#
+#   databricks bundle validate
+#   databricks bundle deploy -t dev
+#   databricks bundle run sales_dwh_daily -t dev
+#
+# Pipelines:
+#   sales_dwh_bronze_ingestion   Auto Loader load of the raw extracts
+#   sales_dwh_daily              ingestion -> dbt build (silver + gold + marts)
+#   sales_dwh_weekly_rebuild     Monday full refresh of the incremental fact
+#   sales_dwh_bronze_maintenance OPTIMIZE + VACUUM on the bronze tables
+
+bundle:
+  name: sales-dwh-databricks-dbt
+  databricks_cli_version: ">=0.220.0"
+
+variables:
+  catalog:
+    description: "Unity Catalog catalog holding the bronze/silver/gold schemas."
+    default: sales_dwh_dev
+  source_bronze_schema:
+    description: "Schema holding the raw, uncleaned extracts."
+    default: bronze
+  landing_root:
+    description: "Root of the object-store landing area for raw extracts."
+    default: abfss://landing@<storage-account>.dfs.core.windows.net/sales_dwh
+  checkpoint_root:
+    description: "Root for Auto Loader checkpoints. Must be on fast storage."
+    default: abfss://checkpoints@<storage-account>.dfs.core.windows.net/sales_dwh
+  schema_root:
+    description: "Root for Auto Loader inferred schemas."
+    default: abfss://schemas@<storage-account>.dfs.core.windows.net/sales_dwh
+  run_as_service_principal:
+    description: "Service principal that owns the production schemas."
+    default: "00000000-0000-0000-0000-000000000000"
+  bronze_retention_hours:
+    description: >
+      Hours of bronze Delta history to keep. Bronze is replayable from the
+      landing zone, so this is deliberately short.
+    default: "720" # 30 days
+  dbt_project_dir:
+    description: "Path to the dbt project inside the workspace."
+    default: dbt
+  dbt_profiles_dir:
+    description: "Path to the dbt profiles directory inside the workspace."
+    default: dbt/profiles
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: sales_dwh_dev
+
+  ci:
+    mode: development
+    variables:
+      catalog: sales_dwh_ci
+
+  prod:
+    mode: production
+    variables:
+      catalog: sales_dwh
+      run_as_service_principal: "${var.run_as_service_principal}"
+    run_as:
+      service_principal_name: "{{ var('run_as_service_principal') }}"
+    permissions:
+      - user_name: "{{ bundle.deployment.principal }}"
+        level: CAN_MANAGE
+
+workspace:
+  root_path: "/Workspace/Users/{{ bundle.deployment.principal }}/.bundle/${bundle.name}/${bundle.target}"
+
+resources:
+  clusters:
+    ingestion_cluster:
+      name: sales-dwh-ingestion
+      spark_version: 15.4.x-scala2.12
+      node_type_id: i3.xlarge
+      data_security_mode: SINGLE_USER
+      autoscale:
+        min_workers: 2
+        max_workers: 8
+      spark_conf:
+        spark.sql.adaptive.enabled: "true"
+        spark.sql.adaptive.coalescePartitions.enabled: "true"
+        # 1 GB base + 4 GB max mirrors how the job is sized against the landing
+        # zone, and keeps Auto Loader from re-reading the same files.
+        spark.databricks.delta.retentionDurationCheck.enabled: "false"
+      custom_tags:
+        project: sales-dwh
+        layer: ingestion
+
+    transformation_cluster:
+      name: sales-dwh-transformations
+      spark_version: 15.4.x-scala2.12
+      node_type_id: i3.xlarge
+      data_security_mode: SINGLE_USER
+      autoscale:
+        min_workers: 2
+        max_workers: 8
+      spark_conf:
+        spark.sql.adaptive.enabled: "true"
+        spark.databricks.optimizeWrite.enabled: "true"
+        # Liquid Clustering on the fact table needs automatic maintenance so
+        # the clustering keys do not drift as data lands.
+        spark.databricks.delta.clustering.automaticMaintenance.enabled: "true"
+      custom_tags:
+        project: sales-dwh
+        layer: transformation
+
+  jobs:
+    # ------------------------------------------------------------ ingestion ---
+    sales_dwh_bronze_ingestion:
+      name: sales-dwh-bronze-ingestion
+      description: "Auto Loader ingestion of the CRM and ERP extracts into bronze."
+      email_notifications:
+        on_failure:
+          - user_name: "{{ bundle.deployment.principal }}"
+      tasks:
+        - task_key: bronze_ingestion
+          job_cluster_key: ingestion_cluster
+          notebook_task:
+            notebook_path: "{{ workspace.root_path }}/../jobs/bronze_ingestion_notebook"
+            base_parameters:
+              catalog: "{{ var('catalog') }}"
+              bronze_schema: "{{ var('source_bronze_schema') }}"
+              landing_root: "{{ var('landing_root') }}"
+              checkpoint_root: "{{ var('checkpoint_root') }}"
+              schema_root: "{{ var('schema_root') }}"
+          health:
+            rules:
+              - metric: FAILED_TASKS
+                op: GREATER_THAN
+                value: 0
+      max_concurrent_runs: 1
+
+    # ------------------------------------------------------- transformations ---
+    sales_dwh_daily:
+      name: sales-dwh-daily
+      description: "Ingestion followed by the dbt build of silver, gold and analytics."
+      email_notifications:
+        on_failure:
+          - user_name: "{{ bundle.deployment.principal }}"
+        on_duration_warning_threshold_exceeded:
+          - user_name: "{{ bundle.deployment.principal }}"
+            minutes: 120
+      tasks:
+        - task_key: bronze_ingestion
+          job_cluster_key: ingestion_cluster
+          notebook_task:
+            notebook_path: "{{ workspace.root_path }}/../jobs/bronze_ingestion_notebook"
+            base_parameters:
+              catalog: "{{ var('catalog') }}"
+              bronze_schema: "{{ var('source_bronze_schema') }}"
+              landing_root: "{{ var('landing_root') }}"
+              checkpoint_root: "{{ var('checkpoint_root') }}"
+              schema_root: "{{ var('schema_root') }}"
+        - task_key: dbt_build
+          job_cluster_key: transformation_cluster
+          depends_on:
+            - task_key: bronze_ingestion
+          dbt:
+            project_dir: "{{ var('dbt_project_dir') }}"
+            profiles_dir: "{{ var('dbt_profiles_dir') }}"
+            catalog: "{{ var('catalog') }}"
+            source: WORKSPACE
+            commands:
+              - deps
+              - build --target {{ target }}
+          dbt_dependencies:
+            - dbt/packages.yml
+      max_concurrent_runs: 1
+
+    # A merge-based incremental fact cannot delete rows that upstream has since
+    # invalidated (bad dates, retracted lines, corrected keys). A weekly full
+    # refresh is what guarantees the fact converges on the source.
+    sales_dwh_weekly_rebuild:
+      name: sales-dwh-weekly-rebuild
+      description: "Monday full refresh of the incremental fact and its downstream marts."
+      schedule:
+        quartz_cron_expression: "0 0 5 ? * MON" # 05:00 Mondays UTC
+        timezone_id: UTC
+        pause_on_status_update: UNPAUSED
+      email_notifications:
+        on_failure:
+          - user_name: "{{ bundle.deployment.principal }}"
+      tasks:
+        - task_key: dbt_full_refresh
+          job_cluster_key: transformation_cluster
+          dbt:
+            project_dir: "{{ var('dbt_project_dir') }}"
+            profiles_dir: "{{ var('dbt_profiles_dir') }}"
+            catalog: "{{ var('catalog') }}"
+            source: WORKSPACE
+            commands:
+              - deps
+              - build --target {{ target }} --full-refresh
+          dbt_dependencies:
+            - dbt/packages.yml
+      max_concurrent_runs: 1
+
+    sales_dwh_bronze_maintenance:
+      name: sales-dwh-bronze-maintenance
+      description: "OPTIMIZE and VACUUM the bronze Delta tables."
+      schedule:
+        quartz_cron_expression: "0 0 4 * * ?" # 04:00 daily UTC
+        timezone_id: UTC
+        pause_on_status_update: UNPAUSED
+      email_notifications:
+        on_failure:
+          - user_name: "{{ bundle.deployment.principal }}"
+      tasks:
+        - task_key: bronze_maintenance
+          job_cluster_key: ingestion_cluster
+          notebook_task:
+            notebook_path: "{{ workspace.root_path }}/../maintenance/bronze_maintenance"
+            base_parameters:
+              catalog: "{{ var('catalog') }}"
+              bronze_schema: "{{ var('source_bronze_schema') }}"
+              retention_hours: "{{ var('bronze_retention_hours') }}"
+      max_concurrent_runs: 1
+
+  permissions:
+    - user_name: "{{ bundle.deployment.principal }}"
+      level: CAN_MANAGE
