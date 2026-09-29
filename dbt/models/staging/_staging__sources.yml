@@ -1,0 +1,167 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Raw landing zone. Written by the Auto Loader job (Delta, append-only) and
+      consumed as-is: every column is a string, nothing is coerced, renamed or
+      de-duplicated. All typing and cleansing happens in the silver layer.
+    schema: "{{ var('bronze_schema') }}"
+    meta:
+      layer: bronze
+      format: delta
+      loader: jobs/bronze_auto_loader.py
+    tables:
+      - name: crm_cust_info
+        description: >
+          CRM customer master. Grain: one row per customer (`cst_id`).
+          `cst_marital_status` and `cst_gndr` are single-character codes and
+          `cst_create_date` is an ISO date string. Contains trailing whitespace
+          and blank gender/marital values.
+        loaded_at_field: _ingested_at
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        data_tests:
+          # KNOWN SOURCE DEFECT: the CRM export contains 4 records with a blank
+          # `cst_id` and 5 customer ids that repeat because the export is a
+          # change feed rather than a snapshot. Bronze is deliberately raw, so
+          # these are reported at `warn`; `stg_crm__customers` resolves them
+          # deterministically and silver/gold assert the invariant as an error.
+          - dbt_utils.unique_combination_of_columns:
+              config:
+                severity: warn
+              arguments:
+                combination_of_columns: ["cst_id"]
+        columns:
+          - name: cst_id
+            description: "Surrogate key of the CRM customer record."
+            data_tests:
+              - not_null:
+                  config:
+                    severity: warn
+          - name: cst_key
+            description: "Natural customer key, shared with the ERP extracts as `AW00011000`."
+            data_tests:
+              - not_null
+          - name: cst_gndr
+            description: "Raw gender code: `M`/`F`/blank."
+          - name: cst_marital_status
+            description: "Raw marital status code: `M`/`S`/blank."
+          - name: _ingested_at
+            description: "Timestamp the batch was written to bronze."
+          - name: _source_file
+            description: "Originating file name, retained for lineage."
+          - name: _batch_id
+            description: "Ingestion batch identifier."
+
+      - name: crm_prd_info
+        description: >
+          CRM product master. One row per product *version*: the same `prd_key`
+          reappears with different `prd_start_dt`/`prd_end_dt` when cost or
+          lifecycle changes. `prd_line` is a padded single-character code
+          (`"R "`, `"M "`, ...). `prd_end_dt` is blank or, for discontinued
+          items, is *earlier* than `prd_start_dt`.
+        loaded_at_field: _ingested_at
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: ["prd_id"]
+        columns:
+          - name: prd_id
+            description: "Surrogate key of this product version."
+            data_tests:
+              - not_null
+          - name: prd_key
+            description: >
+              Fully qualified product key. The first 6 characters are the
+              category prefix (e.g. `BI-RB-`), the remainder is the key used by
+              the sales extract.
+            data_tests:
+              - not_null
+
+      - name: crm_sales_details
+        description: >
+          CRM sales order lines. Grain: one row per order line
+          (`sls_ord_num` + `sls_prd_key`). Dates are `yyyyMMdd` integers and
+          contain a small number of corrupt values; measures may be blank or
+          non-positive.
+        loaded_at_field: _ingested_at
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: ["sls_ord_num", "sls_prd_key"]
+        columns:
+          - name: sls_ord_num
+            description: "Sales order number."
+            data_tests:
+              - not_null
+          - name: sls_prd_key
+            description: "Product key as used by sales - `prd_key` without the category prefix."
+          - name: sls_cust_id
+            description: "Foreign key to `bronze.crm_cust_info.cst_id`."
+          - name: _ingested_at
+            description: "Timestamp the batch was written to bronze."
+
+      - name: erp_cust_az12
+        description: >
+          ERP customer attributes. `CID` carries a `NAS` system prefix that must
+          be stripped before it can be joined to the CRM natural key. `BDATE` is
+          an ISO date, `GEN` is `Male`/`Female` or a single-character code.
+        loaded_at_field: _ingested_at
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: ["CID"]
+        columns:
+          - name: CID
+            description: "ERP customer id in the form `NASAW00011000`."
+            data_tests:
+              - not_null
+
+      - name: erp_loc_a101
+        description: >
+          ERP customer geography. `CID` uses a dash-separated form of the CRM
+          natural key (`AW-00011000`) and must be normalised before joining.
+          `CNTRY` mixes ISO country codes with English names and has blanks.
+        loaded_at_field: _ingested_at
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: ["CID"]
+        columns:
+          - name: CID
+            description: "ERP customer id in the form `AW-00011000`."
+            data_tests:
+              - not_null
+
+      - name: erp_px_cat_g1v2
+        description: >
+          ERP product category reference. `ID` is the category token used as the
+          first 5 characters of `prd_key`, with `-` instead of `_`
+          (`AC_BR` -> `AC-BR`).
+        loaded_at_field: _ingested_at
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: ["ID"]
+        columns:
+          - name: ID
+            description: "Category key, e.g. `AC_BR`."
+            data_tests:
+              - not_null

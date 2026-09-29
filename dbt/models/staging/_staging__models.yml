@@ -1,0 +1,230 @@
+version: 2
+
+models:
+  # ---------------------------------------------------------------- silver ---
+  - name: stg_crm__customers
+    description: >
+      Conformed CRM customer master, one row per customer. Collapses the change
+      feed down to a single record per `customer_id` and translates the
+      single-character marital status and gender codes into readable values.
+    columns:
+      - name: customer_id
+        description: "CRM surrogate key, unique in this model."
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_key
+        description: "Natural customer key shared with the ERP extracts."
+        data_tests:
+          - not_null
+      - name: gender
+        description: "`Male`, `Female` or `Unknown`."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Male", "Female", "Unknown"]
+      - name: marital_status
+        description: "`Married`, `Single` or `Unknown`."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Married", "Single", "Unknown"]
+
+  - name: stg_crm__products
+    description: >
+      Conformed CRM product master at *version* grain. Splits the qualified
+      product key into its category token and the sales-facing product key, and
+      repairs the lifecycle dates.
+    columns:
+      - name: product_version_id
+        description: "Surrogate key of this product version."
+        data_tests:
+          - not_null
+          - unique
+      - name: product_key
+        description: "Product key as referenced by the sales extract."
+        data_tests:
+          - not_null
+      - name: category_id
+        description: "ERP category key, e.g. `AC_BR`."
+      - name: is_current_version
+        description: "True when the source left the version open ended."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+  - name: stg_crm__sales_details
+    description: >
+      Conformed CRM sales order lines. Invalid dates and non-positive measures
+      are rejected here; the rejected share of the source is bounded by
+      `assert_sales_rejection_rate`.
+    columns:
+      - name: order_number
+        description: "Sales order number."
+        data_tests:
+          - not_null
+      - name: product_key
+        description: "Product key as used by sales."
+      - name: customer_id
+        description: "Foreign key to the conformed customer."
+        data_tests:
+          - not_null
+      - name: sales_amount
+        description: "Extended line amount."
+        data_tests:
+          - not_null
+      - name: quantity
+        description: "Units on the order line."
+        data_tests:
+          - not_null
+      - name: unit_price
+        description: "List price per unit."
+        data_tests:
+          - not_null
+      - name: order_date
+        description: "Parsed order date."
+        data_tests:
+          - not_null
+      - name: ship_date
+        description: "Parsed ship date."
+        data_tests:
+          - not_null
+      - name: due_date
+        description: "Parsed due date."
+        data_tests:
+          - not_null
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ["order_number", "product_key"]
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "sales_amount > 0"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "quantity > 0"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "unit_price > 0"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "days_to_ship >= 0"
+
+  - name: stg_erp__customer_attributes
+    description: >
+      ERP customer demographics with the `NAS` system prefix stripped from the
+      customer id so it joins to the CRM natural key.
+    columns:
+      - name: erp_customer_id
+        description: "Raw ERP customer id, `NASAW00011000`."
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_key
+        description: "Normalised customer key, `AW00011000`."
+        data_tests:
+          - not_null
+      - name: gender
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Male", "Female", "Unknown"]
+
+  - name: stg_erp__customer_geography
+    description: >
+      ERP customer geography with the dashed customer id normalised and ISO
+      country codes folded to canonical English names.
+    columns:
+      - name: erp_customer_id
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_key
+        description: "Normalised customer key, `AW00011000`."
+        data_tests:
+          - not_null
+      - name: country
+        description: >
+          Canonical country name. Blank source values are folded to `Unknown`
+          rather than left null, and the handful of ISO codes the ERP emits
+          (`USA`, `US`, `DE`, ...) are resolved to full names. That no raw ISO
+          code survives is asserted by `assert_no_unmapped_country_codes`.
+        data_tests:
+          - not_null
+
+  - name: stg_erp__product_categories
+    description: "ERP product category reference, one row per category."
+    columns:
+      - name: category_id
+        description: "Category key, e.g. `AC_BR`."
+        data_tests:
+          - not_null
+          - unique
+      - name: category_name
+        data_tests:
+          - not_null
+      - name: subcategory_name
+        data_tests:
+          - not_null
+
+  # ---------------------------------------------------------- intermediate ---
+  - name: int_customers__conformed
+    description: >
+      Customer joined to ERP demographics and geography, with age and age band
+      derived. Every customer is retained, including those who never ordered.
+    columns:
+      - name: customer_id
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_key
+        data_tests:
+          - not_null
+      - name: current_age
+        description: "Age in completed years, null when no birth date is on file."
+      - name: age_band
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  ["Unknown", "Under 18", "18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
+
+  - name: int_products__current_version
+    description: >
+      The single current version of every product. This is the model that stops
+      the fact table fanning out against the versioned product master.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ["product_key"]
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "is_current_version = true"
+
+  - name: int_sales__enriched
+    description: >
+      Order lines joined to the conformed customer, the current product version
+      and the ERP category hierarchy, with margin measures derived.
+    columns:
+      - name: sales_line_id
+        description: "Natural order line key, `<order_number>-<product_key>`."
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        data_tests:
+          - not_null
+      - name: product_key
+        data_tests:
+          - not_null
+      - name: order_date
+        data_tests:
+          - not_null
+      - name: sales_amount
+        data_tests:
+          - not_null
+    data_tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "gross_margin is not null"
