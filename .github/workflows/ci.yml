@@ -1,0 +1,135 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # dbt-duckdb resolves the database path against the working directory, so CI
+  # passes an absolute path and can invoke dbt from the repository root.
+  SALES_DWH_DUCKDB_CI_PATH: ${{ github.workspace }}/.local/sales_dwh_ci.duckdb
+  DBT_PROJECT_DIR: dbt
+  DBT_PROFILES_DIR: dbt/profiles
+
+jobs:
+  dbt:
+    name: dbt build (duckdb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      # The ci target writes to its own DuckDB file, so bronze has to be loaded
+      # into that same file or every source looks empty.
+      - name: Load bronze from the sample extracts
+        working-directory: .
+        run: |
+          uv run python -m ingest.load_bronze_local \
+            --mode overwrite \
+            --database .local/sales_dwh_ci.duckdb
+
+      - name: dbt deps
+        run: uv run dbt deps --profiles-dir ${{ env.DBT_PROFILES_DIR }}
+
+      - name: dbt parse
+        run: >
+          uv run dbt parse
+          --profiles-dir ${{ env.DBT_PROFILES_DIR }}
+          --target ci
+          --no-partial-parse
+
+      - name: dbt build
+        run: >
+          uv run dbt build
+          --profiles-dir ${{ env.DBT_PROFILES_DIR }}
+          --target ci
+          --no-partial-parse
+          --full-refresh
+
+      # Catches the class of error that only shows up on the second run, where
+      # the fact table already exists and the incremental path is taken.
+      - name: dbt build (incremental)
+        run: >
+          uv run dbt build
+          --profiles-dir ${{ env.DBT_PROFILES_DIR }}
+          --target ci
+          --no-partial-parse
+          --select fct_sales+
+
+      - name: dbt docs generate
+        run: >
+          uv run dbt docs generate
+          --profiles-dir ${{ env.DBT_PROFILES_DIR }}
+          --target ci
+          --no-partial-parse
+
+      - name: dbt source freshness
+        run: >
+          uv run dbt source freshness
+          --profiles-dir ${{ env.DBT_PROFILES_DIR }}
+          --target ci
+          --no-partial-parse
+
+      - name: upload catalog artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-catalog
+          path: |
+            dbt/target/manifest.json
+            dbt/target/catalog.json
+            dbt/target/run_results.json
+          retention-days: 14
+
+  bundle:
+    name: asset bundle validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@v1
+
+      # Structural validation only: this does not need a workspace or secrets,
+      # so it is safe to run on every pull request.
+      - name: Validate bundle
+        run: databricks bundle validate --target ci
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+  python:
+    name: python checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Syntax check the ingestion and maintenance jobs
+        run: |
+          uv run python -m py_compile \
+            ingest/load_bronze_local.py \
+            jobs/bronze_auto_loader.py \
+            jobs/bronze_ingestion_notebook.py \
+            maintenance/bronze_maintenance.py
