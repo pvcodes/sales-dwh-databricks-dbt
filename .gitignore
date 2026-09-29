@@ -27,3 +27,23 @@ Thumbs.db
 # Other common files
 dist/
 build/
+.dual-graph/
+
+# Local warehouse state and dbt build artifacts.
+# .local/ holds the DuckDB databases built by `make bronze` / `make test`.
+# dbt/target and dbt/logs are regenerated on every run.
+.local/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+logs/
+target/
+
+# Local credentials. profiles.yml is committed because it contains no secrets
+# (credentials come from DATABRICKS_* env vars), but a personal copy should not
+# be.
+dbt/profiles/profiles.local.yml
+dbt/profiles/.user.yml
+.databundle/
+
+*/interview*.md
